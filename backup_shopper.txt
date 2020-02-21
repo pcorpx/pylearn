@@ -1,0 +1,218 @@
+# -*- coding: utf-8 -*-
+
+from flask import Flask, request, jsonify
+import datetime, re
+from sqlalchemy import create_engine
+from sqlalchemy.orm import scoped_session, sessionmaker
+
+application = Flask (__name__)
+engine = create_engine("postgresql+psycopg2://postgres:1952368s@localhost/shopperdb")
+db = scoped_session(sessionmaker(bind=engine))
+import_id = 0
+
+@application.route("/", methods=["GET"])
+def index():
+    return "Hello, man!"
+
+def check_relatives(id, relatives, group): 
+    """ Checks relationships between citizens """
+    if relatives == []:
+        return True  
+    else:
+        check_relatives = 0
+        for r in relatives:
+            for member in group:
+                if r == member["citizen_id"] and r != id: # проверяем есть такой родственник в наборе данных 
+                    if id in member["relatives"]: # проверяем, что отношения двусторонние
+                        check_relatives += 1
+        if check_relatives == len(relatives):
+            return True
+        else:
+            return False
+
+def present(record):
+    citizen = { "citizen_id": record[2],
+                "town": record[3],
+                "street": record[4],
+                "building": record[5],
+                "apartment": record[6],
+                "name": record[7],
+                "birth_date": str(record[8].day) + '.' + str(record[8].month) + '.' + str(record[8].year),
+                "gender": record[9],
+                "relatives": record[10]
+         }
+    return citizen
+
+def validator(citizen):
+    """ Checks attributes except relatives and returns valid attributes """ 
+    valid = {}
+
+    try:
+        valid["citizen_id"] = int(citizen["citizen_id"])
+    except Exception as e:
+        print(e)
+    try:
+        if re.search( '[a-z,A-Z,0-9, а-я, А-Я]', citizen["town"]):
+            valid["town"] = citizen["town"]
+    except Exception as e:
+        print(e)
+    try:
+        if re.search( '[a-z,A-Z,0-9, а-я, А-Я]', citizen["street"]):
+            valid["street"] = citizen["street"]
+    except Exception as e:
+        print(e)
+    
+    try:
+        if re.search( '[a-z,A-Z,0-9, а-я, А-Я]', citizen["building"]):
+            valid["building"] = citizen["building"]
+    except Exception as e:
+        print(e)
+    
+    try:
+        valid["apartment"] = int(citizen["apartment"])
+    except Exception as e:
+        print(e)
+    
+    try:
+        if citizen["name"] not in ["", None]:
+            valid["name"] = citizen["name"]
+    except Exception as e:
+        print(e)
+
+    try:
+        birth_date = citizen["birth_date"].split(".") 
+        birth_date = datetime.date(int(birth_date[2]), int(birth_date[1]), int(birth_date[0]))
+        if birth_date <  datetime.datetime.now().date():
+            valid["birth_date"] = birth_date
+    except Exception as e:
+        print(e)
+
+    try:
+        if citizen["gender"] in ["female", "male"]:
+            valid["gender"] = citizen["gender"]
+    except Exception as e:
+        print(e)
+    try:
+        if isinstance(citizen["relatives"], list) and (citizen["citizen_id"] not in citizen["relatives"]):
+            if len(set(citizen["relatives"])) == len(citizen["relatives"]):
+                valid["relatives"] = citizen["relatives"]
+    except Exception as e:
+        print(e)
+ 
+    return valid
+
+   
+@application.route("/imports", methods=["POST"])
+def imports():
+    global import_id
+    valid_number = len(("citizen_id", "town", "street", "building", "apartment", "name", "birth_date", "gender", "ralatives"))
+    import_id += 1
+    content = request.json
+    group = content["citizens"]
+    valid_members = []
+
+    for member in group:
+        valid = validator(member)
+        if len(list(valid.keys())) == valid_number:
+            try:
+                if check_relatives(valid["citizen_id"], valid["relatives"], group):
+                    valid_members.append(valid)
+            except Exception as e:
+                print(e)
+             
+
+    if len(valid_members) == len(group):
+        for member in valid_members:
+            db.execute("INSERT INTO imports (import_id, citizen_id, town, street, building, apartment, name, birth_date, gender, relatives) VALUES \
+                (:import_id, :citizen_id, :town, :street, :building, :apartment, :name, :birth_date, :gender, :relatives)", {"import_id": import_id, 
+                "citizen_id": member["citizen_id"], "town": member["town"], "street": member["street"], "building": member["building"], "apartment": member["apartment"], 
+                "name": member["name"], "birth_date": member["birth_date"], "gender": member["gender"], "relatives": member["relatives"] })
+        db.commit()
+        return jsonify({"data": {"import_id": import_id}}), 201
+
+    return jsonify({"data": ""}), 400
+
+@application.route("/imports/<import_id>/citizens/<citizen_id>", methods=["PATCH"])
+def update_citizen(import_id, citizen_id):
+    citizen = request.json
+    try:
+        citizen["citizen_id"] = int(citizen_id)
+        import_id = int(import_id)
+    except:
+        return jsonify({"data": ""}), 400
+    valid = validator(citizen)
+    def update_attrs(valid):
+        for attr in list(valid.keys()):
+             db.execute("UPDATE imports SET %s = :attr WHERE import_id = :import_id AND citizen_id = :citizen_id" % attr, 
+                        {"attr": valid[attr], "import_id": import_id, "citizen_id": valid["citizen_id"]})
+             db.commit()
+        db.close()
+
+    if len(list(valid.keys())) == len(list(citizen.keys())):
+        if 'relatives' in list(valid.keys()):
+            relations = db.execute("SELECT citizen_id, relatives FROM imports WHERE import_id=:import_id", {"import_id": import_id}).fetchall()
+            db.close()
+            group = []
+            members = []
+            changed_relatives = []
+            for record in relations:
+                member = {}
+                member["citizen_id"] = record[0]
+                members.append(member["citizen_id"])
+                member["relatives"] = record[1]
+                group.append(member)
+            if (set(valid["relatives"]) < set(members)):
+                for member in group:
+                    if member["citizen_id"] in valid["relatives"]:
+                        if valid["citizen_id"] not in member["relatives"]:
+                            member["relatives"].append(valid["citizen_id"])
+                            changed_relatives.append(member["citizen_id"])
+                    else:
+                        if valid["citizen_id"] in member["relatives"]:
+                            member["relatives"].remove(valid["citizen_id"])
+                            changed_relatives.append(member["citizen_id"])
+                        elif valid["citizen_id"] == member["citizen_id"]:
+                            member["relatives"] = valid["relatives"]
+                for member in group:
+                    if member["citizen_id"] in changed_relatives:
+                        db.execute("UPDATE imports SET relatives = :relatives WHERE import_id = :import_id AND citizen_id = :citizen_id", 
+                        {"relatives": member["relatives"], "import_id": import_id, "citizen_id": member["citizen_id"]})
+                        db.commit()
+                        db.close()
+                update_attrs(valid)
+            else:
+                return jsonify({"data": ""}), 400
+        else:
+            update_attrs(valid)
+    else:
+        return jsonify({"data": ""}), 400
+
+    record = db.execute("SELECT * FROM imports WHERE import_id=:import_id AND citizen_id=:citizen_id", 
+                         {"import_id": import_id, "citizen_id": citizen["citizen_id"]}).fetchone()
+    db.close()
+    
+    result = {
+        "data": present(record)
+    }
+    print( result)
+    return jsonify(result), 200
+
+
+@application.route("/imports/<import_id>/citizens", methods=["GET"])
+def get_citizens(import_id):
+    try:
+        import_id = int(import_id)
+        records = db.execute("SELECT * FROM imports WHERE import_id=:import_id ORDER BY citizen_id", {"import_id": import_id}).fetchall()
+        db.close()
+        citizens = []
+        for record in records:
+            citizens.append(present(record))
+        if len(citizens) != 0:
+            return jsonify({"data": citizens}), 200
+    except Exception as e:
+        print(e)
+    return jsonify({"data": ""}), 400
+    
+
+if __name__ == "__main__":
+    application.run(host="0.0.0.0", port="8080")
